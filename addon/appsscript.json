@@ -1,0 +1,33 @@
+{
+  "timeZone": "America/New_York",
+  "dependencies": {},
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/script.scriptapp",
+    "https://www.googleapis.com/auth/gmail.addons.execute"
+  ],
+  "urlFetchWhitelist": [
+    "https://trouble-drift-confiding.ngrok-free.dev/"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Malicious Email Scorer",
+      "logoUrl": "https://www.gstatic.com/images/icons/material/system/2x/security_black_24dp.png",
+      "layoutProperties": {
+        "primaryColor": "#1a73e8",
+        "secondaryColor": "#e8f0fe"
+      }
+    },
+    "gmail": {
+      "contextualTriggers": [
+        {
+          "unconditional": {},
+          "onTriggerFunction": "buildCard"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,426 @@
+# Malicious Email Scorer - Gmail Add-on
+
+A Gmail Add-on that analyzes the currently open email and presents a maliciousness score (0-100), a risk verdict, and per-signal reasoning directly in the Gmail sidebar.
+
+---
+
+## Table of Contents
+
+1. [What It Does](#what-it-does)
+2. [Usage](#usage)
+3. [Architecture](#architecture)
+4. [Key Technologies](#key-technologies)
+5. [Modular Architecture and Separation of Concerns](#modular-architecture-and-separation-of-concerns)
+6. [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions)
+7. [Signals Analyzed](#signals-analyzed)
+8. [Security and Privacy Design](#security-and-privacy-design)
+9. [Running Locally](#running-locally)
+10. [Project Structure](#project-structure)
+11. [Future Roadmap](#future-roadmap)
+
+---
+
+## What It Does
+
+When you open any email in Gmail, the add-on sidebar shows:
+
+- **Score** - a number from 0 to 100 (higher = more dangerous)
+- **Risk level** - LOW / MEDIUM / HIGH / CRITICAL, color-coded
+- **Verdict** - a one-line summary (e.g., *"Likely Phishing or Scam"*)
+- **Signal breakdown** - every detected flag, its severity, and a plain-English explanation
+- **Analyze Again** - re-run on demand
+
+| High Risk Detection | Low Risk Detection |
+|:---:|:---:|
+| ![High risk analysis result](images/analysis_high_risk.png) | ![Low risk analysis result](images/analysis_low_risk.png) |
+| *Figure 1: Real-time analysis of a suspicious email in the Gmail sidebar.* | *Figure 2: Analysis of a legitimate email with a clean result.* |
+
+---
+
+## Usage
+
+1. **Open any email** in your Gmail inbox.
+2. **Click the Malicious Email Scorer icon** in the right-side panel to open the add-on sidebar.
+3. **View the results** - the risk score, verdict, and detailed signal breakdown appear instantly.
+
+> **Note:** The Google Apps Script component is currently in Developer Mode. Access is restricted to the developer's account and designated Test Users within the Google Cloud Console. This ensures a secure, isolated environment during the development and evaluation phase.
+
+---
+
+## Architecture
+
+```
+Gmail Add-on (Google Apps Script)
+         |
+         |  POST /analyze  (HTTPS via ngrok or deployed server)
+         v
+ FastAPI Backend (Python)
+         |
+         +--> Cache Manager       -- SHA-256 lookup; returns early on hit
+         |
+         +--> Header Analyzer     -- SPF/DKIM/DMARC, display-name spoofing, Reply-To mismatch
+         +--> URL Analyzer        -- lookalike domains, IP-based URLs, shorteners, misleading links
+         +--> Content Analyzer    -- PII anonymization, then Claude Haiku for social engineering
+         +--> Scorer              -- weighted aggregation -> final score + verdict
+```
+
+### Why a hybrid rule-based + LLM approach?
+
+| Approach | Strength | Weakness |
+|---|---|---|
+| Rules only | Fast, deterministic, free | Cannot understand semantic intent |
+| LLM only | Understands nuance and context | Expensive, slower, not auditable per-signal |
+| **Hybrid (this project)** | **Each signal is independently auditable; LLM fills gaps rules cannot** | **Slightly more complex** |
+
+The rule-based analyzers handle unambiguous signals (SPF fail = cryptographically verified forgery attempt). Claude handles what rules cannot: patterns like urgency and pressure tactics that manifest in hundreds of different phrasings no regex can enumerate.
+
+---
+
+## Key Technologies
+
+| Layer | Technology |
+|---|---|
+| **Frontend** | Google Apps Script (V8 runtime), JavaScript, Card Service API |
+| **Backend** | Python 3.12, FastAPI, Uvicorn, Pydantic |
+| **AI and Security** | Claude 3 Haiku (Anthropic API), tldextract, Levenshtein Algorithm, SHA-256 Hashing, Regex (PII Masking) |
+| **Infrastructure** | ngrok, Docker |
+
+---
+
+## Modular Architecture and Separation of Concerns
+
+### The Zero-Touch UI Principle
+
+The system was built with a strict boundary between the frontend (Gmail Add-on) and the backend (FastAPI server). The Apps Script layer has exactly one job: read the open email, assemble a structured JSON payload, send it to the backend, and render whatever comes back. No analysis logic lives in the frontend.
+
+This was a deliberate choice from the start. Google Apps Script is a constrained, difficult-to-test environment. Keeping all business logic on the Python backend means the analysis pipeline can be developed, tested, and debugged with standard tools, while the add-on stays simple and stable.
+
+### Seamless Evolution in Practice
+
+The value of this separation became clear when the two major features in this iteration were added: PII anonymization and result caching.
+
+Both features were implemented entirely on the backend:
+- `pii_anonymizer.py` strips email addresses, phone numbers, and names before the text reaches Claude.
+- `cache_manager.py` intercepts duplicate requests before any analyzer runs.
+
+The Google Apps Script files (`Code.gs`, `EmailParser.gs`, `CardBuilder.gs`, `Config.gs`) were not changed at all. The add-on continued to send the same payload format and receive the same `AnalysisResult` shape. From the frontend's perspective, nothing happened.
+
+This is the practical payoff of separation of concerns: backend improvements do not require redeploying or retesting the frontend. In a production environment, this kind of boundary would mean a mobile team, a web team, and a backend team can all iterate independently without coordinating releases.
+
+---
+
+## Architectural Trade-offs and Decisions
+
+### 1. Privacy-First Analysis (PII Anonymization)
+
+**Decision:** Strip all recognizable PII (email addresses, phone numbers, titled names) from the email text before sending it to the Claude API.
+
+**Why:** The backend processes emails that may contain sensitive personal information. Sending raw email content to a third-party API is a real data-privacy concern, especially in a corporate or regulated environment. The anonymization layer reduces the data exposed to the LLM to only the patterns relevant for phishing detection.
+
+**The trade-off:** After anonymization, the raw sender address and any embedded email addresses are replaced with `[EMAIL]`. This means Claude cannot reason about specific domain names or addresses in the body text. We accept this loss because:
+
+- Header analysis (SPF/DKIM/DMARC, display-name spoofing, Reply-To mismatch) and URL analysis both run *before* anonymization on the original payload, using deterministic Python code that never leaves the server.
+- The LLM's comparative advantage is detecting *semantic* signals like urgency language and social engineering patterns, not validating specific addresses. A rule-based check is better suited for address validation anyway.
+
+**Current limitation:** The name detection uses honorific prefixes (`Mr.`, `Dr.`, etc.) to avoid false positives. This is a practical compromise - bare title-case pairs would incorrectly redact product names, city names, and other proper nouns. A model-based NER approach would do this more accurately (see Roadmap).
+
+---
+
+### 2. Heuristic Scoring vs. Machine Learning
+
+**Decision:** Use a fixed, weighted scoring system where each signal contributes a predetermined integer weight to the total score.
+
+**Why:** The task specification requires an explainable verdict with per-signal reasoning. A weighted heuristic system maps directly to this requirement: every point in the final score can be traced back to a specific, named signal with a human-readable description.
+
+**The trade-off:**
+
+| | Weighted Heuristics (current) | ML-Based Scoring (future) |
+|---|---|---|
+| Explainability | Full - each signal is auditable | Partial - requires interpretability tooling |
+| Calibration | Manual - weights are educated guesses | Data-driven - learned from labeled examples |
+| Coverage | Limited to signals someone thought to write | Can learn subtle correlations from data |
+| Maintenance | Requires manual tuning as tactics evolve | Requires labeled data and retraining pipeline |
+
+For a project at this stage, the heuristic approach is the right call. It produces results that are easy to understand, debug, and demonstrate. The ML path becomes worth the cost when there is a labeled dataset and a feedback mechanism to keep the model calibrated against current phishing tactics.
+
+---
+
+### 3. Performance vs. Freshness (Result Caching)
+
+**Decision:** Cache analysis results in memory (with JSON file persistence) keyed by a SHA-256 hash of the email's subject and body.
+
+**Cache key generation:**
+
+```python
+# subject and body are joined with a null byte to prevent
+# hash collisions between ("ab", "cd") and ("a", "bcd")
+raw = f"{subject}\x00{body}".encode()
+key = hashlib.sha256(raw).hexdigest()
+```
+
+**Why SHA-256:** The hash is a fixed-length fingerprint of the email content. Two emails with identical subject and body will always produce the same key, so a cached result can be returned immediately without calling any analyzer. SHA-256 is collision-resistant enough that false cache hits are not a practical concern.
+
+**The trade-off:** The cache assumes that identical email content always warrants the same verdict. This is true for bulk phishing campaigns (where the same template is sent to many recipients), which is also the scenario where caching provides the most benefit. The trade-off is that if the signal weights or detection logic are updated, cached results will be stale until the cache is cleared. For this demo, that is acceptable - a production system would version the cache keys alongside the analyzer code.
+
+**Scope:** For this demo, storage is an in-memory dictionary that persists to a local JSON file on each write. In production, this would be replaced with a shared cache (Redis or similar) to work correctly across multiple server instances.
+
+---
+
+## Signals Analyzed
+
+### Header Signals (deterministic)
+
+| Signal | Weight | Rationale |
+|---|---|---|
+| SPF Authentication Failed | 25 | The sending server is not authorized for this domain. Hard cryptographic evidence of sender forgery. |
+| SPF Soft Fail | 12 | Domain policy marks this server as suspect but not definitively unauthorized. |
+| DKIM Signature Invalid | 15 | The message body was altered in transit or the sender's key does not match. |
+| DMARC Policy Violation | 15 | The domain owner's explicit policy flags this message as fraudulent. |
+| Display Name Spoofing | 20 | Display name claims to be a known brand but the actual email domain does not match. The most common phishing technique - easy to execute, highly effective against non-technical users. |
+| Reply-To Domain Mismatch | 15 | Sender and Reply-To are on different domains - replies go to an attacker-controlled inbox without the forged domain. |
+
+### URL Signals (deterministic)
+
+| Signal | Weight | Rationale |
+|---|---|---|
+| Lookalike Domain | 25 | Domain is within Levenshtein distance 2 of a known brand (paypa1.com, g00gle.com) or uses subdomain abuse (paypal.com.evil.net). Highest-weight URL signal because it directly enables credential theft. |
+| IP-Based URL | 15 | No legitimate service links users to a raw IP address. |
+| URL Shortener | 10 | Conceals the true destination. Weighted lower because shorteners have legitimate uses - treated as a supporting signal, not a standalone red flag. |
+| Misleading Link Text | 20 | Visible link text shows one domain but href points to another. Deliberate deception. |
+
+#### How Lookalike Domain Detection Works
+
+Lookalike detection is based on Levenshtein distance - a measure of how many single-character edits (insertions, deletions, or substitutions) are needed to turn one string into another.
+
+**Example:**
+```
+"paypal"  vs  "paypa1"  ->  distance = 1  (one substitution: l -> 1)
+"google"  vs  "gooogle" ->  distance = 1  (one insertion: extra 'o')
+"microsoft" vs "micros0ft" -> distance = 1  (one substitution: o -> 0)
+```
+
+Any domain name with a distance of 2 or less from a known brand is flagged as a lookalike.
+
+**Target brand list (44 brands protected):**
+
+| Category | Brands |
+|---|---|
+| Big tech and cloud | `paypal`, `apple`, `google`, `microsoft`, `amazon`, `adobe`, `dropbox`, `icloud`, `github`, `zoom`, `slack`, `docusign`, `salesforce` |
+| Social and communication | `netflix`, `facebook`, `instagram`, `linkedin`, `twitter`, `tiktok`, `snapchat`, `whatsapp`, `spotify`, `discord` |
+| Email providers | `outlook`, `yahoo`, `gmail`, `hotmail`, `protonmail` |
+| E-commerce and shipping | `ebay`, `walmart`, `etsy`, `fedex`, `ups`, `dhl`, `usps` |
+| Banking and finance | `chase`, `wellsfargo`, `bankofamerica`, `citibank`, `capitalone`, `amex`, `hsbc`, `barclays`, `fidelity`, `schwab`, `intuit` |
+| Crypto | `coinbase`, `binance`, `kraken` |
+| Gaming | `steam` |
+
+The comparison is applied to the registered domain only (e.g. `paypa1` from `paypa1.com`), not the full URL. This avoids false positives from long subdomains and focuses the check on the part of the URL that users are most likely to trust visually.
+
+In addition to Levenshtein, the analyzer also checks for subdomain abuse: if a known brand domain appears anywhere inside a different registered domain (e.g. `paypal.com.evil.net`), it is also flagged.
+
+### Content Signals (LLM - Claude Haiku)
+
+Claude is asked to identify:
+
+| Signal | Weight range | Why LLM? |
+|---|---|---|
+| Urgency / fear language | 5-15 | Manifests in too many phrasings for regex to enumerate reliably. |
+| Credential / payment request | 10-20 | Requires understanding context, not just keyword matching. |
+| Brand impersonation intent | 10-20 | The email may not name the brand explicitly but mimic its tone, formatting, or claimed authority. |
+| Social engineering pattern | 5-15 | Reward bait, false authority, threat of consequence - semantic patterns only. |
+
+Claude returns structured JSON via the `tool_use` API, making the output both reliable and directly mappable to `Signal` objects.
+
+### Scoring
+
+```
+score = min(100, sum of weights of all triggered signals)
+```
+
+| Score | Risk Level | Verdict |
+|---|---|---|
+| 0-30 | LOW | Appears Legitimate |
+| 31-55 | MEDIUM | Suspicious - Proceed with Caution |
+| 56-80 | HIGH | Likely Phishing or Scam |
+| 81-100 | CRITICAL | Almost Certainly Malicious |
+
+**Scoring philosophy:** The system uses an additive model deliberately. A single weak signal (e.g., a URL shortener) is not enough to condemn an email - URL shorteners have legitimate uses. But when the same email also fails SPF and requests credentials, the combined score reflects a level of risk that no single signal alone would justify. This additive approach minimizes false positives by requiring convergence of evidence, while still providing defense-in-depth: each additional attack indicator raises the score independently, so no single check is a single point of failure.
+
+---
+
+## Security and Privacy Design
+
+Security is treated as a first-class concern in this project. Since the system processes untrusted emails, every layer of the architecture is designed to minimize risk and protect sensitive data.
+
+### 1. Handling Untrusted Input
+
+Every email body, attachment, and header is treated as a potential attack vector:
+
+- **Plain text only**: `EmailParser.gs` calls `.getPlainBody()` exclusively and discards all HTML. This structurally prevents XSS and tracking pixels from ever reaching the backend or the LLM prompt.
+- **Input sanitization and truncation**: Email bodies are capped at 4,000 characters in the add-on. Pydantic `max_length` constraints on the backend provide a second enforcement layer. Requests over 50 KB are rejected with HTTP 413. This prevents DoS attacks on the analysis engine.
+- **Safe UI rendering**: All results shown in the Gmail sidebar use Google's native `CardService` widgets (`TextParagraph`, `KeyValue`), which automatically escape any malicious characters in the verdict or signal descriptions. XSS via a crafted subject or body is structurally impossible.
+- **Rate limiting**: `slowapi` enforces 30 requests per minute per IP to prevent abuse.
+
+### 2. Protection of Sensitive Data (Privacy)
+
+- **PII anonymization**: Before the email text is sent to the Claude API, it passes through a dedicated anonymization layer that strips names, phone numbers, and email addresses. This reduces the data exposed to a third-party API to only the patterns relevant for phishing detection. The full rationale and trade-offs are covered in [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions).
+- **Zero-trace logging**: Backend logs are restricted to metadata only (`score`, `risk_level`, `signal_count`, `elapsed_ms`). Raw email content and personal identifiers are never written to logs.
+- **Result caching**: Analysis results are stored against a SHA-256 hash of the email content, not the content itself. This allows the system to return scores for known phishing campaigns instantly without re-processing or storing the actual email text.
+
+### 3. Secrets Management
+
+- **Zero hardcoding**: No API keys or server URLs are present in any source file.
+- **Add-on secrets**: `BACKEND_URL` and `API_KEY` are stored in Google Script Properties and never appear in the `.gs` source files or the repository.
+- **Backend secrets**: `ANTHROPIC_API_KEY` and `API_KEY` are loaded from environment variables via `pydantic-settings`.
+- **Transport enforcement**: The add-on validates that `BACKEND_URL` starts with `https://` before making any request, preventing accidental plain-HTTP usage. Every `/analyze` request requires a `Bearer` token; invalid tokens return 401 immediately.
+
+### 4. Zero-Trust Analysis Environment
+
+- **Static analysis only**: The backend never fetches or follows URLs found in emails. Only their structure is inspected (string patterns, Levenshtein distance, known shortener domains). This avoids any interaction with potentially malicious infrastructure.
+- **No file execution**: The system identifies high-risk attachments by metadata (file extension, MIME type) but deliberately avoids opening or executing them. This ensures the server is never exposed to malicious code, at the cost of not detecting obfuscated threats - a trade-off addressed in the [Future Roadmap](#future-roadmap).
+
+---
+
+## Running Locally
+
+### Prerequisites
+- Python 3.12+
+- An [Anthropic API key](https://console.anthropic.com)
+- [ngrok](https://ngrok.com) (free tier is fine)
+- A Google account
+
+### 1. Start the backend
+
+```bash
+cd backend
+cp .env.example .env
+# Edit .env: fill in ANTHROPIC_API_KEY and choose a strong random API_KEY
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Verify it is running:
+```bash
+curl http://localhost:8000/health
+# {"status":"ok"}
+```
+
+### 2. Expose via ngrok
+
+```bash
+ngrok http 8000
+```
+
+Copy the `https://` URL - you will need it in step 4.
+
+### 3. Deploy the add-on
+
+1. Open [script.google.com](https://script.google.com) and create a new project.
+2. Create these files (copy from the `addon/` directory):
+   - `appsscript.json` (replace the default manifest)
+   - `Config.gs`
+   - `EmailParser.gs`
+   - `CardBuilder.gs`
+   - `Code.gs`
+3. Go to **Project Settings -> Script Properties** and add:
+   | Property | Value |
+   |---|---|
+   | `BACKEND_URL` | Your ngrok `https://` URL |
+   | `API_KEY` | The same value as in your `.env` |
+4. Click **Deploy -> Test deployments -> Install**.
+5. Open [Gmail](https://mail.google.com), open any email - the sidebar appears.
+
+---
+
+## Project Structure
+
+The project is divided into two main parts: the **Gmail Add-on** (Frontend) and the **Analysis Server** (Backend).
+
+### 1. Gmail Add-on (`/addon`)
+* **`appsscript.json`**: Configuration file for Google (permissions and add-on settings).
+* **`Code.gs`**: The main logic that triggers the analysis and talks to the backend.
+* **`EmailParser.gs`**: Extracts text and technical data from the opened email.
+* **`CardBuilder.gs`**: Builds the visual interface (the results card) you see in Gmail.
+* **`Config.gs`**: Safely manages the server URL and secret API keys.
+
+### 2. Backend Engine (`/backend/app`)
+* **`main.py`**: The entry point of the server. It manages the analysis flow.
+* **`models.py`**: Defines how the email data and analysis results should look.
+* **`pii_anonymizer.py`**: Strips names and phones from the text to protect user privacy.
+* **`cache_manager.py`**: Remembers previous scans to provide instant results and save costs.
+* **`security.py`**: Ensures only your add-on can communicate with the server.
+* **`config.py`**: Loads environment settings and secrets.
+
+### 3. Analyzers (`/backend/app/analyzers`)
+* **`header_analyzer.py`**: Checks technical data for sender spoofing or forgery.
+* **`url_analyzer.py`**: Scans links in the email for malicious or "lookalike" domains.
+* **`content_analyzer.py`**: Uses AI (Claude) to detect social engineering and scam patterns.
+* **`scorer.py`**: Combines all findings into a final risk score (0-100).
+
+### 4. Infrastructure
+* **`requirements.txt`**: List of Python libraries needed to run the server.
+* **`Dockerfile`**: Instructions for running the server in a container.
+
+---
+
+## Future Roadmap: Evolution from Static to Dynamic Analysis
+
+The current system provides a robust baseline for phishing detection. However, there are inherent limitations in static analysis that the following roadmap items are designed to address.
+
+### 1. Addressing Attachments
+
+**Current state:** The system identifies that an attachment exists but does not inspect its internal content. We deliberately avoid opening or "detonating" files at this stage to maintain a zero-trust environment and avoid the significant infrastructure overhead and security risks associated with executing untrusted code on our server.
+
+**Proposed fix:** Attachment heuristics.
+
+**Impact:** By analyzing metadata, we can flag high-risk file extensions (e.g., `.exe`, `.docm`, `.vbs`) and identify password-protected archives - a common tactic for bypassing basic scanners - providing a high level of protection without the resource cost or the danger of actual file execution.
+
+---
+
+### 2. Transitioning from Manual Rules to Data-Driven Scoring
+
+**Current state:** Signal weights are determined manually (heuristics). We opted for this approach in the initial version to prioritize explainability and to establish a robust feature-extraction baseline. Transitioning to ML requires a large, high-quality dataset of labeled phishing and legitimate emails (ground truth), as well as a rigorous training and validation pipeline, which was outside the immediate scope of this architecture.
+
+**Proposed fix:** ML-powered scoring.
+
+**Impact:** Moving to a classifier trained on verified phishing datasets will allow the system to automatically optimize weights and recognize subtle patterns that manual rules might miss. This leads to a more accurate, dynamic risk score that adapts to evolving attacker techniques.
+
+---
+
+### 3. Countering Advanced Obfuscation (The Expert Layer)
+
+**Current state:** The system currently relies on static analysis - inspecting the email's components (text, headers, and URL strings) without interacting with them. We cannot see what happens behind a shortened URL (like Bitly) or what a file actually does once opened.
+
+**Why it was not implemented yet:**
+
+1. **Infrastructure costs and orchestration** - Full dynamic analysis requires virtual machines (VMs) that are heavy on CPU/RAM and expensive to run in the cloud. It also requires complex orchestration: the ability to automatically start, clean, and reset (snapshot) a VM after every scan.
+2. **Latency vs. user experience** - A sandbox can take 2-5 minutes to detonate a file and observe behavior. This would conflict with the near-instant feedback expected from a Gmail sidebar add-on.
+3. **Security risks** - Hardening a sandbox to prevent "sandbox escapes" (where malware detects the VM or tries to infect the host server) is a significant engineering undertaking.
+
+**Proposed fix:** Dynamic analysis (sandbox detonation).
+
+**Impact:** This would allow the backend to follow shortened URLs through all redirects and execute attachments in an isolated VM. Since the backend is modular, this can be added as a standalone analyzer module that observes behavior in real-time, catching zero-day threats that hide behind layers of obfuscation.
+
+---
+
+### 4. Closing the Loop with User Intelligence
+
+**Current state:** The analysis flows one way - from the system to the user. The system does not know if its verdict was actually correct.
+
+**Proposed fix:** User feedback loop.
+
+**Impact:** Adding "Mark as Safe" or "Report Phishing" buttons in the sidebar will provide the ground-truth data needed to calibrate the scoring system and improve detection accuracy over time.
+
+---
+
+### 5. Contextual Tuning (False Positive Mitigation)
+
+**Current state:** Legitimate security alerts (e.g., Google's "New login detected") are occasionally flagged as high-risk. These emails naturally use urgent language and call-to-action buttons, which the AI correctly identifies as phishing patterns. Additionally, they often originate from subdomains (like `accounts.google.com`) that may not perfectly match a strict `google.com` check.
+
+**Proposed fix:** Brand Infrastructure Mapping and Signal Alignment.
+
+**Impact:**
+
+- **Subdomain awareness**: Enhancing the brand-matching logic to recognize that subdomains (e.g., `*.google.com`) are fully authorized by the parent brand.
+- **Trust-based weighting**: When an email passes full SPF/DKIM/DMARC alignment from a verified brand, the system will automatically reduce the weight of AI-detected urgency or "Action Required" signals.
+
+**Outcome:** Technical authentication (Headers) will take precedence over semantic patterns (AI), significantly reducing false alarms for legitimate security notifications.
