@@ -315,9 +315,13 @@ The following conditions each trigger the floor independently:
 | `Display Name Spoofing` | The most prolific phishing vector. An attacker who spoofed a brand display name and chose a mismatched domain has demonstrated clear intent. |
 | **SPF/DKIM failure + brand impersonation (compound check)** | An authentication failure proves technical forgery. When it co-occurs with a brand impersonation signal, it confirms the email is both fraudulent *and* targeting a trusted brand. Either failure alone does not trigger the floor - only the combination does, to avoid penalizing misconfigured-but-legitimate senders. |
 
-**Verified brand exception:** For verified senders, `CONTENT` signals are ignored by the floor logic. Only `HEADERS` and `URLS` signals can trigger the 90-point floor - urgency language alone does not justify a CRITICAL verdict when authentication is clean.
+**Verified Brand Policy**
 
-The additive model and the hard-fail logic are complementary: every signal still contributes its weight to the total, and the floor only engages when the additive sum alone would under-classify the threat.
+The 90-point floor is strictly reserved for objective technical evidence (`HEADERS` and `URLS`). Semantic signals from AI analysis contribute to the additive score but are ignored by the floor logic. This ensures that an urgent tone in a legitimate security alert can never trigger a CRITICAL verdict on its own.
+
+**How it works**
+
+The additive model and the floor logic are complementary. Every signal contributes its weight to the total score, but the floor acts as a safety net - engaging only when technical forgery is detected that the additive sum might otherwise under-score.
 
 ---
 
@@ -461,7 +465,7 @@ The current system provides a robust baseline for phishing detection. However, t
 
 ---
 
-### 3. Countering Advanced Obfuscation (The Expert Layer)
+### 3. Countering Advanced Obfuscation
 
 **Current state:** The system currently relies on static analysis - inspecting the email's components (text, headers, and URL strings) without interacting with them. We cannot see what happens behind a shortened URL (like Bitly) or what a file actually does once opened.
 
