@@ -1,4 +1,29 @@
-from app.models import AnalysisResult, RiskLevel, Signal
+from app.models import AnalysisResult, RiskLevel, Severity, Signal, SignalCategory
+
+# Individual signals that always floor the score to CRITICAL on their own.
+CRITICAL_INDICATORS: frozenset[str] = frozenset({
+    "Lookalike Domain Detected",  # Levenshtein ≤ 2 from brand — url_analyzer
+    "Display Name Spoofing",      # Brand in display name, mismatched domain — header_analyzer
+})
+
+# Technical authentication failures that confirm the sending server is forged.
+_AUTH_FAILURE_SIGNALS: frozenset[str] = frozenset({
+    "SPF Authentication Failed",
+    "DKIM Signature Invalid",
+})
+
+# Signals that confirm the email is impersonating a known brand.
+_BRAND_IMPERSONATION_SIGNALS: frozenset[str] = frozenset({
+    "Lookalike Domain Detected",
+    "Display Name Spoofing",
+})
+
+# Severity downgrade applied to AI content signals from verified brand senders.
+# Prevents legitimate urgency language from triggering the hard-fail floor.
+_VERIFIED_SEVERITY_DOWNGRADE: dict[Severity, Severity] = {
+    Severity.CRITICAL: Severity.MEDIUM,
+    Severity.HIGH: Severity.LOW,
+}
 
 
 def _risk_level(score: int) -> RiskLevel:
@@ -49,8 +74,39 @@ def _summary(risk: RiskLevel, signals: list[Signal]) -> str:
     )
 
 
-def score(signals: list[Signal]) -> AnalysisResult:
-    total = min(100, sum(s.weight for s in signals))
+def score(signals: list[Signal], verified_brand: bool = False) -> AnalysisResult:
+    # Verified senders (e.g. real google.com) legitimately use urgent language.
+    # Dampen AI content signals to 20% of their original weight so they no longer
+    # dominate the score, while remaining visible in the breakdown.
+    if verified_brand:
+        signals = [
+            s.model_copy(update={
+                "weight": max(1, round(s.weight * 0.2)),
+                "severity": _VERIFIED_SEVERITY_DOWNGRADE.get(s.severity, s.severity),
+            })
+            if s.category == SignalCategory.CONTENT
+            else s
+            for s in signals
+        ]
+
+    raw_total = min(100, sum(s.weight for s in signals))
+
+    names = frozenset(s.name for s in signals)
+    brand_auth_failure = bool(names & _AUTH_FAILURE_SIGNALS) and bool(names & _BRAND_IMPERSONATION_SIGNALS)
+
+    # For verified brands, AI content signals cannot trigger the hard-fail floor —
+    # legitimate security emails are expected to use urgent language. Only technical
+    # signals (HEADERS, URLS) retain the ability to floor the score.
+    has_critical = (
+        any(
+            s.severity == Severity.CRITICAL or s.name in CRITICAL_INDICATORS
+            for s in signals
+            if not (verified_brand and s.category == SignalCategory.CONTENT)
+        )
+        or brand_auth_failure
+    )
+    total = max(90, raw_total) if has_critical else raw_total
+
     risk = _risk_level(total)
     return AnalysisResult(
         score=total,

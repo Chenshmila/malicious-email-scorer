@@ -9,7 +9,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app.analyzers import content_analyzer, header_analyzer, scorer, url_analyzer
+from app.analyzers import content_analyzer, header_analyzer, scorer, temporal_analyzer, url_analyzer
 from app.models import AnalysisResult, EmailPayload
 from app.security import require_api_key
 from app import cache_manager
@@ -92,9 +92,11 @@ async def analyze(request: Request) -> AnalysisResult:
     header_signals = header_analyzer.analyze(payload)
     url_signals = url_analyzer.analyze(payload)
     content_signals = content_analyzer.analyze(payload)
+    temporal_signals = temporal_analyzer.analyze(payload)
 
-    all_signals = header_signals + url_signals + content_signals
-    result = scorer.score(all_signals)
+    all_signals = header_signals + url_signals + content_signals + temporal_signals
+    verified = header_analyzer.is_verified_brand(payload)
+    result = scorer.score(all_signals, verified_brand=verified)
 
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     logger.info(

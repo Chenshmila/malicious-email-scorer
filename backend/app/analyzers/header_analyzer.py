@@ -1,6 +1,8 @@
 import re
 from email.utils import parseaddr
 
+import tldextract
+
 from app.models import EmailPayload, Severity, Signal, SignalCategory
 
 # Well-known brand names whose display names are commonly spoofed.
@@ -55,10 +57,13 @@ def _check_display_name_spoof(from_address: str) -> Signal | None:
         return None
 
     sender_domain = _extract_domain(from_address)
+    # Compare only the registered domain (e.g. "google.com" from
+    # "accounts.google.com") to avoid false-positives on legitimate subdomains.
+    sender_registered = tldextract.extract(sender_domain).registered_domain
     name_lower = display_name.lower().replace(" ", "")
 
     for brand, legit_domains in _BRAND_DOMAINS.items():
-        if brand in name_lower and sender_domain not in legit_domains:
+        if brand in name_lower and sender_registered not in legit_domains:
             return Signal(
                 name="Display Name Spoofing",
                 category=SignalCategory.HEADERS,
@@ -71,6 +76,19 @@ def _check_display_name_spoof(from_address: str) -> Signal | None:
                 ),
             )
     return None
+
+
+def is_verified_brand(payload: EmailPayload) -> bool:
+    """Return True if the sender's registered domain is an official domain for a known brand.
+
+    Used by the scorer to dampen AI-generated signals for verified senders (e.g. a real
+    Google security alert that legitimately uses urgent language).
+    """
+    sender_domain = _extract_domain(payload.from_address)
+    if not sender_domain:
+        return False
+    sender_registered = tldextract.extract(sender_domain).registered_domain
+    return any(sender_registered in legit_domains for legit_domains in _BRAND_DOMAINS.values())
 
 
 def analyze(payload: EmailPayload) -> list[Signal]:

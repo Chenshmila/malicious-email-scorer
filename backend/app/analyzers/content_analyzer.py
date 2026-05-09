@@ -5,7 +5,6 @@ import anthropic
 
 from app.config import settings
 from app.models import EmailPayload, Severity, Signal, SignalCategory
-from app import pii_anonymizer
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +41,12 @@ Focus exclusively on content-level signals (not headers or URLs, those are analy
 - Brand impersonation through tone, language patterns, or claimed identity
 - Social engineering tactics (false authority, reward bait, threat of consequence, sympathy manipulation)
 - Grammar/phrasing inconsistencies typical of translated phishing templates
+- Linguistic integrity: Analyze the grammatical quality and syntax of the email body.
+  Look for signs of Machine Translation such as wrong verb tense or gender agreement,
+  unnatural or stilted phrasing, broken sentence structure, or vocabulary mismatches
+  that suggest the text was auto-translated from another language. If poor linguistic
+  integrity is detected, report it as a signal named exactly "Linguistic Anomaly Detected"
+  with severity "medium" and a weight between 10 and 15.
 
 For each signal found, assign:
 - A clear name (3-6 words)
@@ -58,7 +63,8 @@ def analyze(payload: EmailPayload) -> list[Signal]:
 
     Returns an empty list on any API failure so rule-based analysis still produces a result.
     """
-    email_text = pii_anonymizer.anonymize(
+    # subject and plain_body are already anonymized by EmailParser.gs on the client
+    email_text = (
         f"Subject: {payload.subject}\n"
         f"From: {payload.from_address}\n\n"
         f"{payload.plain_body}"

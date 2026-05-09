@@ -45,6 +45,7 @@ class EmailPayload(BaseModel):
     received_spf: Optional[str] = Field(default=None, max_length=512)
     authentication_results: Optional[str] = Field(default=None, max_length=1024)
     dkim_signature: Optional[str] = Field(default=None, max_length=1024)
+    email_date: Optional[str] = Field(default=None, max_length=256)
     attachments: list[AttachmentInfo] = Field(default_factory=list, max_length=20)
 
 

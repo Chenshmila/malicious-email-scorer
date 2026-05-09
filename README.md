@@ -4,19 +4,33 @@ A Gmail Add-on that analyzes the currently open email and presents a maliciousne
 
 ---
 
+## TL;DR
+
+A Gmail Add-on for phishing detection that combines:
+
+- **Rule-based security analysis** - SPF/DKIM/DMARC, spoofing detection, URL inspection.
+- **AI-based detection** - Claude-powered semantic analysis for social engineering and linguistic anomalies.
+- **Verified Brand Handling** - Context-aware scoring to reduce false positives from legitimate automated alerts.
+
+**Built with:** Google Apps Script, FastAPI, Claude Haiku, and a modular analyzer architecture.
+**Designed for:** Privacy-by-design (client-side PII anonymization), explainability, and defense-in-depth.
+
+---
+
 ## Table of Contents
 
 1. [What It Does](#what-it-does)
 2. [Usage](#usage)
 3. [Architecture](#architecture)
-4. [Key Technologies](#key-technologies)
-5. [Modular Architecture and Separation of Concerns](#modular-architecture-and-separation-of-concerns)
-6. [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions)
-7. [Signals Analyzed](#signals-analyzed)
-8. [Security and Privacy Design](#security-and-privacy-design)
-9. [Running Locally](#running-locally)
-10. [Project Structure](#project-structure)
-11. [Future Roadmap](#future-roadmap)
+4. [Advanced Security Architecture](#advanced-security-architecture)
+5. [Key Technologies](#key-technologies)
+6. [Modular Architecture and Separation of Concerns](#modular-architecture-and-separation-of-concerns)
+7. [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions)
+8. [Signals Analyzed](#signals-analyzed)
+9. [Security and Privacy Design](#security-and-privacy-design)
+10. [Running Locally](#running-locally)
+11. [Project Structure](#project-structure)
+12. [Future Roadmap](#future-roadmap)
 
 ---
 
@@ -51,17 +65,20 @@ When you open any email in Gmail, the add-on sidebar shows:
 
 ```
 Gmail Add-on (Google Apps Script)
-         |
-         |  POST /analyze  (HTTPS via ngrok or deployed server)
+         |  [PII stripped here: emails → [EMAIL], phones → [PHONE], names → [NAME]]
+         |  POST /analyze  (HTTPS - pre-anonymized payload)
          v
  FastAPI Backend (Python)
          |
          +--> Cache Manager       -- SHA-256 lookup; returns early on hit
          |
-         +--> Header Analyzer     -- SPF/DKIM/DMARC, display-name spoofing, Reply-To mismatch
+         +--> Header Analyzer     -- SPF/DKIM/DMARC, subdomain-aware brand matching, Reply-To mismatch
+         |                           └─ is_verified_brand() flags official senders for scorer
          +--> URL Analyzer        -- lookalike domains, IP-based URLs, shorteners, misleading links
-         +--> Content Analyzer    -- PII anonymization, then Claude Haiku for social engineering
-         +--> Scorer              -- weighted aggregation -> final score + verdict
+         +--> Content Analyzer    -- Claude for social engineering + linguistic integrity (body already clean)
+         +--> Temporal Analyzer   -- delivery-time anomaly detection for financial brand emails
+         +--> Scorer              -- additive sum + context-aware hard-fail floor → final score + verdict
+                                     └─ verified brand: CONTENT signals dampened 80%, excluded from floor
 ```
 
 ### Why a hybrid rule-based + LLM approach?
@@ -76,13 +93,55 @@ The rule-based analyzers handle unambiguous signals (SPF fail = cryptographicall
 
 ---
 
+## Advanced Security Architecture
+
+### 1. Client-Side PII Anonymization
+
+PII is removed before the data leaves the Gmail session.
+
+```
+john.smith@company.com  →  [EMAIL]
++1 (800) 555-0199       →  [PHONE]
+Dr. Sarah Connor        →  [NAME]
+```
+
+---
+
+### 2. Verified Brand Handling
+
+Automated alerts from financial institutions and service providers use the same patterns as phishing - urgency, call-to-action language, branded tone. Content analysis alone cannot distinguish them.
+
+`header_analyzer.is_verified_brand()` extracts the sender's registered domain via `tldextract` and checks it against the brand-to-domain map. If it matches, the scorer dampens all `CONTENT` signals and excludes them from the hard-fail floor.
+
+**What "verified" means:** Only AI-generated semantic signals are dampened. A verified domain with a lookalike URL or a failed SPF check still scores high - `HEADERS`/`URLS` signals bypass verification entirely.
+
+---
+
+### 3. Context-Aware Signal Dampening
+
+When a sender is verified, all `SignalCategory.CONTENT` signals (AI-generated) are transformed before scoring:
+
+| Original | After dampening |
+|---|---|
+| `severity=CRITICAL`, `weight=20` | `severity=MEDIUM`, `weight=4` |
+| `severity=HIGH`, `weight=15` | `severity=LOW`, `weight=3` |
+| `severity=MEDIUM`, `weight=10` | `severity=MEDIUM`, `weight=2` |
+
+The signals remain visible in the sidebar breakdown (with their reduced weights), so the user can still see that urgency language was detected - they just understand it is not being treated as a threat indicator for this sender. Transparency is preserved.
+
+For verified senders, `CONTENT` signals are ignored by the floor logic. Only `HEADERS` and `URLS` signals can trigger the floor - urgency language alone should never lock a sender with clean technical authentication at 90/CRITICAL.
+
+---
+
+---
+
 ## Key Technologies
 
 | Layer | Technology |
 |---|---|
-| **Frontend** | Google Apps Script (V8 runtime), JavaScript, Card Service API |
+| **Frontend** | Google Apps Script (V8 runtime), JavaScript, Card Service API, Gmail REST API (metadata headers: `Received-SPF`, `Authentication-Results`, `DKIM-Signature`, `Reply-To`, `Date`), client-side Regex engine for PII anonymization |
 | **Backend** | Python 3.12, FastAPI, Uvicorn, Pydantic |
-| **AI and Security** | Claude 3 Haiku (Anthropic API), tldextract, Levenshtein Algorithm, SHA-256 Hashing, Regex (PII Masking) |
+| **AI and Security** | Claude Haiku (Anthropic API) - configurable; supports Claude Sonnet for higher-accuracy semantic analysis - `tldextract` (registered-domain extraction for subdomain-aware brand matching), Levenshtein Algorithm, SHA-256 Hashing |
 | **Infrastructure** | ngrok, Docker |
 
 ---
@@ -97,32 +156,31 @@ This was a deliberate choice from the start. Google Apps Script is a constrained
 
 ### Seamless Evolution in Practice
 
-The value of this separation became clear when the two major features in this iteration were added: PII anonymization and result caching.
+The value of this separation became clear across two iterations of the project. In the first iteration, result caching (`cache_manager.py`) was added entirely on the backend - the add-on sent the same payload it always did and received the same `AnalysisResult` shape. The frontend was not touched.
 
-Both features were implemented entirely on the backend:
-- `pii_anonymizer.py` strips email addresses, phone numbers, and names before the text reaches Claude.
-- `cache_manager.py` intercepts duplicate requests before any analyzer runs.
+In the second iteration, the PII anonymization layer was *moved* from the backend to the frontend - a privacy-by-design improvement. The backend contract (the `EmailPayload` schema) did not change; the subject and body fields simply arrive pre-anonymized. The backend's analyzers, scorer, and cache logic required no modification.
 
-The Google Apps Script files (`Code.gs`, `EmailParser.gs`, `CardBuilder.gs`, `Config.gs`) were not changed at all. The add-on continued to send the same payload format and receive the same `AnalysisResult` shape. From the frontend's perspective, nothing happened.
-
-This is the practical payoff of separation of concerns: backend improvements do not require redeploying or retesting the frontend. In a production environment, this kind of boundary would mean a mobile team, a web team, and a backend team can all iterate independently without coordinating releases.
+This is the practical payoff of a clean API boundary: moving a cross-cutting concern from one layer to another required changes only in the layer being changed. No downstream code broke, and the add-on continued to send the same JSON shape it always had.
 
 ---
 
 ## Architectural Trade-offs and Decisions
 
-### 1. Privacy-First Analysis (PII Anonymization)
+### 1. Privacy-First Analysis (Client-Side PII Anonymization)
 
-**Decision:** Strip all recognizable PII (email addresses, phone numbers, titled names) from the email text before sending it to the Claude API.
+**Decision:** Strip all recognizable PII (email addresses, phone numbers, titled names) from the email text *in the browser*, before the payload is transmitted to the backend.
 
-**Why:** The backend processes emails that may contain sensitive personal information. Sending raw email content to a third-party API is a real data-privacy concern, especially in a corporate or regulated environment. The anonymization layer reduces the data exposed to the LLM to only the patterns relevant for phishing detection.
+**Why:** Moving the anonymization boundary from the backend to the Gmail Add-on (`EmailParser.gs`) means PII is scrubbed before it ever leaves the user's Gmail session. The backend receives a pre-cleaned payload. The Claude API never sees raw personal data. This is a stronger privacy guarantee than server-side anonymization, which still exposes the raw content to the network transit and server process.
 
-**The trade-off:** After anonymization, the raw sender address and any embedded email addresses are replaced with `[EMAIL]`. This means Claude cannot reason about specific domain names or addresses in the body text. We accept this loss because:
+**The trade-off:** After anonymization, embedded email addresses in the body are replaced with `[EMAIL]`. This means Claude cannot reason about specific domain names in the body text. We accept this loss because:
 
-- Header analysis (SPF/DKIM/DMARC, display-name spoofing, Reply-To mismatch) and URL analysis both run *before* anonymization on the original payload, using deterministic Python code that never leaves the server.
-- The LLM's comparative advantage is detecting *semantic* signals like urgency language and social engineering patterns, not validating specific addresses. A rule-based check is better suited for address validation anyway.
+- Header analysis (SPF/DKIM/DMARC, display-name spoofing, Reply-To mismatch) and URL analysis run on the original `from_address` and header fields, which are *not* anonymized - they are needed for domain verification.
+- The LLM's comparative advantage is detecting *semantic* signals like urgency and social engineering patterns, not validating addresses. A rule-based check is better suited for address validation.
 
-**Current limitation:** The name detection uses honorific prefixes (`Mr.`, `Dr.`, etc.) to avoid false positives. This is a practical compromise - bare title-case pairs would incorrectly redact product names, city names, and other proper nouns. A model-based NER approach would do this more accurately (see Roadmap).
+**Implementation:** Three regex patterns in `EmailParser.gs` mirror the original Python anonymizer:
+- Email addresses → `[EMAIL]`
+- Phone numbers (US/international formats) → `[PHONE]`
+- Names preceded by a common honorific (`Mr.`, `Dr.`, `Prof.`, etc.) → `[NAME]`
 
 ---
 
@@ -176,8 +234,9 @@ key = hashlib.sha256(raw).hexdigest()
 | SPF Soft Fail | 12 | Domain policy marks this server as suspect but not definitively unauthorized. |
 | DKIM Signature Invalid | 15 | The message body was altered in transit or the sender's key does not match. |
 | DMARC Policy Violation | 15 | The domain owner's explicit policy flags this message as fraudulent. |
-| Display Name Spoofing | 20 | Display name claims to be a known brand but the actual email domain does not match. The most common phishing technique - easy to execute, highly effective against non-technical users. |
+| Display Name Spoofing | 20 | Display name claims to be a known brand but the registered domain of the sender does not match. Uses `tldextract` to compare registered domains, so `no-reply@accounts.google.com` correctly passes the Google check. The most common phishing technique - easy to execute, highly effective against non-technical users. |
 | Reply-To Domain Mismatch | 15 | Sender and Reply-To are on different domains - replies go to an attacker-controlled inbox without the forged domain. |
+| Temporal Anomaly Detected | 10 | Email purportedly from a financial institution (PayPal, Chase, IRS, etc.) was delivered on a weekend or outside business hours (10 PM – 6 AM) in the sender's local timezone. Automated alerts from banks operate on predictable business-hour schedules; deep-night delivery is a meaningful anomaly. |
 
 ### URL Signals (deterministic)
 
@@ -227,6 +286,7 @@ Claude is asked to identify:
 | Credential / payment request | 10-20 | Requires understanding context, not just keyword matching. |
 | Brand impersonation intent | 10-20 | The email may not name the brand explicitly but mimic its tone, formatting, or claimed authority. |
 | Social engineering pattern | 5-15 | Reward bait, false authority, threat of consequence - semantic patterns only. |
+| Linguistic Anomaly Detected | 10-15 | Signs of Machine Translation: wrong verb tense or gender agreement, unnatural or stilted phrasing, broken sentence structure, or vocabulary mismatches that suggest the text was auto-translated from another language. Phishing kits are often translated from Russian, Chinese, or Romanian before deployment. |
 
 Claude returns structured JSON via the `tool_use` API, making the output both reliable and directly mappable to `Signal` objects.
 
@@ -243,7 +303,21 @@ score = min(100, sum of weights of all triggered signals)
 | 56-80 | HIGH | Likely Phishing or Scam |
 | 81-100 | CRITICAL | Almost Certainly Malicious |
 
-**Scoring philosophy:** The system uses an additive model deliberately. A single weak signal (e.g., a URL shortener) is not enough to condemn an email - URL shorteners have legitimate uses. But when the same email also fails SPF and requests credentials, the combined score reflects a level of risk that no single signal alone would justify. This additive approach minimizes false positives by requiring convergence of evidence, while still providing defense-in-depth: each additional attack indicator raises the score independently, so no single check is a single point of failure.
+**Scoring philosophy:** The system uses an additive model deliberately. A single weak signal (e.g., a URL shortener) is not enough to condemn an email. But when the same email also fails SPF and requests credentials, the combined score reflects a level of risk no individual signal alone would justify. Each additional indicator raises the score independently, so no single check is a single point of failure. Signal weights are also context-aware: for verified brand senders, AI-generated signals are reduced to 20% of their original weight before the sum is computed.
+
+**Hard-Fail Override (Floor Logic):** Certain high-confidence signals are so unambiguous that the additive sum alone understates the risk. For these, the scorer applies a floor: if any *critical indicator* is present, the final score is raised to at least **90/CRITICAL**, regardless of the additive total.
+
+The following conditions each trigger the floor independently:
+
+| Trigger | Rationale |
+|---|---|
+| `Lookalike Domain Detected` (any signal with `severity=critical`) | A domain within Levenshtein distance 2 of a known brand is direct evidence of a credential-harvesting infrastructure. Even in isolation, this alone justifies a CRITICAL verdict. |
+| `Display Name Spoofing` | The most prolific phishing vector. An attacker who spoofed a brand display name and chose a mismatched domain has demonstrated clear intent. |
+| **SPF/DKIM failure + brand impersonation (compound check)** | An authentication failure proves technical forgery. When it co-occurs with a brand impersonation signal, it confirms the email is both fraudulent *and* targeting a trusted brand. Either failure alone does not trigger the floor - only the combination does, to avoid penalizing misconfigured-but-legitimate senders. |
+
+**Verified brand exception:** For verified senders, `CONTENT` signals are ignored by the floor logic. Only `HEADERS` and `URLS` signals can trigger the 90-point floor - urgency language alone does not justify a CRITICAL verdict when authentication is clean.
+
+The additive model and the hard-fail logic are complementary: every signal still contributes its weight to the total, and the floor only engages when the additive sum alone would under-classify the threat.
 
 ---
 
@@ -262,7 +336,7 @@ Every email body, attachment, and header is treated as a potential attack vector
 
 ### 2. Protection of Sensitive Data (Privacy)
 
-- **PII anonymization**: Before the email text is sent to the Claude API, it passes through a dedicated anonymization layer that strips names, phone numbers, and email addresses. This reduces the data exposed to a third-party API to only the patterns relevant for phishing detection. The full rationale and trade-offs are covered in [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions).
+- **Client-side PII anonymization**: Email addresses, phone numbers, and honorific names are stripped from the subject and body by `EmailParser.gs` *before the payload is transmitted*. PII never reaches the backend network layer or the Claude API. This is a privacy-by-design boundary - the scrubbing happens at the source. Full rationale in [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions).
 - **Zero-trace logging**: Backend logs are restricted to metadata only (`score`, `risk_level`, `signal_count`, `elapsed_ms`). Raw email content and personal identifiers are never written to logs.
 - **Result caching**: Analysis results are stored against a SHA-256 hash of the email content, not the content itself. This allows the system to return scores for known phishing campaigns instantly without re-processing or storing the actual email text.
 
@@ -345,16 +419,17 @@ The project is divided into two main parts: the **Gmail Add-on** (Frontend) and 
 ### 2. Backend Engine (`/backend/app`)
 * **`main.py`**: The entry point of the server. It manages the analysis flow.
 * **`models.py`**: Defines how the email data and analysis results should look.
-* **`pii_anonymizer.py`**: Strips names and phones from the text to protect user privacy.
+* **`pii_anonymizer.py`**: Legacy server-side anonymization reference. Active logic moved to client-side (`EmailParser.gs`) for Privacy-by-Design.
 * **`cache_manager.py`**: Remembers previous scans to provide instant results and save costs.
 * **`security.py`**: Ensures only your add-on can communicate with the server.
 * **`config.py`**: Loads environment settings and secrets.
 
 ### 3. Analyzers (`/backend/app/analyzers`)
-* **`header_analyzer.py`**: Checks technical data for sender spoofing or forgery.
+* **`header_analyzer.py`**: Checks technical data for sender spoofing or forgery. Uses `tldextract` for subdomain-aware brand matching to eliminate false positives on legitimate subdomains (e.g., `accounts.google.com`).
 * **`url_analyzer.py`**: Scans links in the email for malicious or "lookalike" domains.
-* **`content_analyzer.py`**: Uses AI (Claude) to detect social engineering and scam patterns.
-* **`scorer.py`**: Combines all findings into a final risk score (0-100).
+* **`content_analyzer.py`**: Uses AI (Claude) to detect social engineering, scam patterns, and linguistic anomalies indicative of machine-translated phishing kits.
+* **`temporal_analyzer.py`**: Inspects the email's `Date` header and flags delivery-time anomalies for financial brand emails (weekends, late nights).
+* **`scorer.py`**: Combines all findings into a final risk score (0-100). Implements hard-fail override logic and a compound SPF/DKIM + brand-impersonation check to ensure critical threat signals are never under-classified.
 
 ### 4. Infrastructure
 * **`requirements.txt`**: List of Python libraries needed to run the server.
@@ -409,18 +484,3 @@ The current system provides a robust baseline for phishing detection. However, t
 **Proposed fix:** User feedback loop.
 
 **Impact:** Adding "Mark as Safe" or "Report Phishing" buttons in the sidebar will provide the ground-truth data needed to calibrate the scoring system and improve detection accuracy over time.
-
----
-
-### 5. Contextual Tuning (False Positive Mitigation)
-
-**Current state:** Legitimate security alerts (e.g., Google's "New login detected") are occasionally flagged as high-risk. These emails naturally use urgent language and call-to-action buttons, which the AI correctly identifies as phishing patterns. Additionally, they often originate from subdomains (like `accounts.google.com`) that may not perfectly match a strict `google.com` check.
-
-**Proposed fix:** Brand Infrastructure Mapping and Signal Alignment.
-
-**Impact:**
-
-- **Subdomain awareness**: Enhancing the brand-matching logic to recognize that subdomains (e.g., `*.google.com`) are fully authorized by the parent brand.
-- **Trust-based weighting**: When an email passes full SPF/DKIM/DMARC alignment from a verified brand, the system will automatically reduce the weight of AI-detected urgency or "Action Required" signals.
-
-**Outcome:** Technical authentication (Headers) will take precedence over semantic patterns (AI), significantly reducing false alarms for legitimate security notifications.

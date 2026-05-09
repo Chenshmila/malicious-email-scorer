@@ -10,6 +10,21 @@ var EmailParser = (function () {
   var MAX_BODY_CHARS = 4000;
 
   /**
+   * Strip recognizable PII from a string before it leaves the browser.
+   * Mirrors the patterns in backend/app/pii_anonymizer.py.
+   */
+  function _anonymize(text) {
+    if (!text) return text;
+    // Email addresses
+    text = text.replace(/\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/g, '[EMAIL]');
+    // Phone numbers (US / international: +1-800-555-0199, (800) 555-0199, 800.555.0199)
+    text = text.replace(/(?<!\d)(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/g, '[PHONE]');
+    // Names preceded by a common honorific
+    text = text.replace(/\b(?:Mr\.|Mrs\.|Ms\.|Miss|Dr\.|Prof\.)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b/g, '[NAME]');
+    return text;
+  }
+
+  /**
    * Build the payload object from a Gmail contextual event.
    * @param {Object} event - The Gmail add-on event object.
    * @returns {Object} Payload ready to POST to /analyze.
@@ -21,7 +36,7 @@ var EmailParser = (function () {
 
     var message = GmailApp.getMessageById(messageId);
 
-    var plainBody = message.getPlainBody() || '';
+    var plainBody = _anonymize(message.getPlainBody() || '');
     if (plainBody.length > MAX_BODY_CHARS) {
       plainBody = plainBody.substring(0, MAX_BODY_CHARS);
     }
@@ -29,13 +44,14 @@ var EmailParser = (function () {
     var rawHeaders = _extractRawHeaders(message);
 
     return {
-      subject:                message.getSubject() || '',
+      subject:                _anonymize(message.getSubject() || ''),
       from_address:           message.getFrom() || '',
       reply_to:               _getReplyTo(message) || null,
       plain_body:             plainBody,
       received_spf:           rawHeaders.receivedSpf || null,
       authentication_results: rawHeaders.authResults || null,
       dkim_signature:         rawHeaders.dkimSignature || null,
+      email_date:             rawHeaders.emailDate || null,
       attachments:            _getAttachments(message)
     };
   }
@@ -50,7 +66,8 @@ var EmailParser = (function () {
                 message.getId() + '?format=metadata' +
                 '&metadataHeaders=Received-SPF' +
                 '&metadataHeaders=Authentication-Results' +
-                '&metadataHeaders=DKIM-Signature';
+                '&metadataHeaders=DKIM-Signature' +
+                '&metadataHeaders=Date';
 
       var response = UrlFetchApp.fetch(url, {
         headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
@@ -68,6 +85,7 @@ var EmailParser = (function () {
         if (name === 'received-spf')           result.receivedSpf   = h.value;
         if (name === 'authentication-results') result.authResults   = h.value;
         if (name === 'dkim-signature')         result.dkimSignature = h.value;
+        if (name === 'date')                   result.emailDate     = h.value;
       });
 
       return result;
