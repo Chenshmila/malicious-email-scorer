@@ -22,11 +22,11 @@ A Gmail Add-on for phishing detection that combines:
 1. [What It Does](#what-it-does)
 2. [Usage](#usage)
 3. [Architecture](#architecture)
-4. [Advanced Security Architecture](#advanced-security-architecture)
-5. [Key Technologies](#key-technologies)
-6. [Modular Architecture and Separation of Concerns](#modular-architecture-and-separation-of-concerns)
-7. [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions)
-8. [Signals Analyzed](#signals-analyzed)
+4. [Key Technologies](#key-technologies)
+5. [Signals Analyzed](#signals-analyzed)
+6. [Advanced Security Architecture](#advanced-security-architecture)
+7. [Modular Architecture and Separation of Concerns](#modular-architecture-and-separation-of-concerns)
+8. [Architectural Trade-offs and Decisions](#architectural-trade-offs-and-decisions)
 9. [Security and Privacy Design](#security-and-privacy-design)
 10. [Running Locally](#running-locally)
 11. [Project Structure](#project-structure)
@@ -50,7 +50,6 @@ When you open any email in Gmail, the add-on sidebar shows:
 | *Figure 1: Real-time analysis of a suspicious email in the Gmail sidebar.* | *Figure 2: Analysis of a legitimate email with a clean result.* |
 
 ---
-
 ## Usage
 
 1. **Open any email** in your Gmail inbox.
@@ -60,7 +59,6 @@ When you open any email in Gmail, the add-on sidebar shows:
 > **Note:** The Google Apps Script component is currently in Developer Mode. Access is restricted to the developer's account and designated Test Users within the Google Cloud Console. This ensures a secure, isolated environment during the development and evaluation phase.
 
 ---
-
 ## Architecture
 
 ```
@@ -92,34 +90,6 @@ Gmail Add-on (Google Apps Script)
 The rule-based analyzers handle unambiguous signals (SPF fail = cryptographically verified forgery attempt). Claude handles what rules cannot: patterns like urgency and pressure tactics that manifest in hundreds of different phrasings no regex can enumerate.
 
 ---
-
-## Advanced Security Architecture
-
-### 1. Client-Side PII Anonymization
-
-PII is removed before the data leaves the Gmail session.
-
-```
-john.smith@company.com  →  [EMAIL]
-+1 (800) 555-0199       →  [PHONE]
-Dr. Sarah Connor        →  [NAME]
-```
-
----
-
-### 2. Verified Brand Handling
-
-Automated alerts from trusted brands (banks, payment services, tech platforms) often mimic phishing patterns - urgency, call-to-action language, branded tone. Content analysis alone cannot distinguish them from forgeries.
-
-`header_analyzer.is_verified_brand()` identifies official senders by extracting the registered domain via `tldextract` and matching it against the brand-to-domain map. For verified senders:
-
-- **Contextual Dampening:** AI-generated signals are reduced to 20% of their original weight. They remain visible in the breakdown but no longer dominate the score.
-- **Floor Exclusion:** Only technical evidence (`HEADERS`/`URLS`) can trigger the 90-point hard-fail floor. Semantic signals are ignored by the floor logic.
-
-A verified domain with a lookalike URL or a failed SPF check still scores high - `HEADERS`/`URLS` signals bypass verification entirely.
-
----
-
 ## Key Technologies
 
 | Layer | Technology |
@@ -130,85 +100,6 @@ A verified domain with a lookalike URL or a failed SPF check still scores high -
 | **Infrastructure** | ngrok, Docker |
 
 ---
-
-## Modular Architecture and Separation of Concerns
-
-### The Zero-Touch UI Principle
-
-The system was built with a strict boundary between the frontend (Gmail Add-on) and the backend (FastAPI server). The Apps Script layer has exactly one job: read the open email, assemble a structured JSON payload, send it to the backend, and render whatever comes back. No analysis logic lives in the frontend.
-
-This was a deliberate choice from the start. Google Apps Script is a constrained, difficult-to-test environment. Keeping all business logic on the Python backend means the analysis pipeline can be developed, tested, and debugged with standard tools, while the add-on stays simple and stable.
-
-### Seamless Evolution in Practice
-
-The value of this separation became clear across two iterations of the project. In the first iteration, result caching (`cache_manager.py`) was added entirely on the backend - the add-on sent the same payload it always did and received the same `AnalysisResult` shape. The frontend was not touched.
-
-In the second iteration, the PII anonymization layer was *moved* from the backend to the frontend - a privacy-by-design improvement. The backend contract (the `EmailPayload` schema) did not change; the subject and body fields simply arrive pre-anonymized. The backend's analyzers, scorer, and cache logic required no modification.
-
-This is the practical payoff of a clean API boundary: moving a cross-cutting concern from one layer to another required changes only in the layer being changed. No downstream code broke, and the add-on continued to send the same JSON shape it always had.
-
----
-
-## Architectural Trade-offs and Decisions
-
-### 1. Privacy-First Analysis (Client-Side PII Anonymization)
-
-**Decision:** Strip all recognizable PII (email addresses, phone numbers, titled names) from the email text *in the browser*, before the payload is transmitted to the backend.
-
-**Why:** Moving the anonymization boundary from the backend to the Gmail Add-on (`EmailParser.gs`) means PII is scrubbed before it ever leaves the user's Gmail session. The backend receives a pre-cleaned payload. The Claude API never sees raw personal data. This is a stronger privacy guarantee than server-side anonymization, which still exposes the raw content to the network transit and server process.
-
-**The trade-off:** After anonymization, embedded email addresses in the body are replaced with `[EMAIL]`. This means Claude cannot reason about specific domain names in the body text. We accept this loss because:
-
-- Header analysis (SPF/DKIM/DMARC, display-name spoofing, Reply-To mismatch) and URL analysis run on the original `from_address` and header fields, which are *not* anonymized - they are needed for domain verification.
-- The LLM's comparative advantage is detecting *semantic* signals like urgency and social engineering patterns, not validating addresses. A rule-based check is better suited for address validation.
-
-**Implementation:** Three regex patterns in `EmailParser.gs` mirror the original Python anonymizer:
-- Email addresses → `[EMAIL]`
-- Phone numbers (US/international formats) → `[PHONE]`
-- Names preceded by a common honorific (`Mr.`, `Dr.`, `Prof.`, etc.) → `[NAME]`
-
----
-
-### 2. Heuristic Scoring vs. Machine Learning
-
-**Decision:** Use a fixed, weighted scoring system where each signal contributes a predetermined integer weight to the total score.
-
-**Why:** The task specification requires an explainable verdict with per-signal reasoning. A weighted heuristic system maps directly to this requirement: every point in the final score can be traced back to a specific, named signal with a human-readable description.
-
-**The trade-off:**
-
-| | Weighted Heuristics (current) | ML-Based Scoring (future) |
-|---|---|---|
-| Explainability | Full - each signal is auditable | Partial - requires interpretability tooling |
-| Calibration | Manual - weights are educated guesses | Data-driven - learned from labeled examples |
-| Coverage | Limited to signals someone thought to write | Can learn subtle correlations from data |
-| Maintenance | Requires manual tuning as tactics evolve | Requires labeled data and retraining pipeline |
-
-For a project at this stage, the heuristic approach is the right call. It produces results that are easy to understand, debug, and demonstrate. The ML path becomes worth the cost when there is a labeled dataset and a feedback mechanism to keep the model calibrated against current phishing tactics.
-
----
-
-### 3. Performance vs. Freshness (Result Caching)
-
-**Decision:** Cache analysis results in memory (with JSON file persistence) keyed by a SHA-256 hash of the email's subject and body.
-
-**Cache key generation:**
-
-```python
-# subject and body are joined with a null byte to prevent
-# hash collisions between ("ab", "cd") and ("a", "bcd")
-raw = f"{subject}\x00{body}".encode()
-key = hashlib.sha256(raw).hexdigest()
-```
-
-**Why SHA-256:** The hash is a fixed-length fingerprint of the email content. Two emails with identical subject and body will always produce the same key, so a cached result can be returned immediately without calling any analyzer. SHA-256 is collision-resistant enough that false cache hits are not a practical concern.
-
-**The trade-off:** The cache assumes that identical email content always warrants the same verdict. This is true for bulk phishing campaigns (where the same template is sent to many recipients), which is also the scenario where caching provides the most benefit. The trade-off is that if the signal weights or detection logic are updated, cached results will be stale until the cache is cleared. For this demo, that is acceptable - a production system would version the cache keys alongside the analyzer code.
-
-**Scope:** For this demo, storage is an in-memory dictionary that persists to a local JSON file on each write. In production, this would be replaced with a shared cache (Redis or similar) to work correctly across multiple server instances.
-
----
-
 ## Signals Analyzed
 
 ### Header Signals (deterministic)
@@ -309,7 +200,108 @@ The 90-point floor is strictly reserved for objective technical evidence (`HEADE
 The additive model and the floor logic are complementary. Every signal contributes its weight to the total score, but the floor acts as a safety net - engaging only when technical forgery is detected that the additive sum might otherwise under-score.
 
 ---
+## Advanced Security Architecture
 
+### 1. Client-Side PII Anonymization
+
+PII is removed before the data leaves the Gmail session.
+
+```
+john.smith@company.com  →  [EMAIL]
++1 (800) 555-0199       →  [PHONE]
+Dr. Sarah Connor        →  [NAME]
+```
+
+---
+
+### 2. Verified Brand Handling
+
+Automated alerts from trusted brands (banks, payment services, tech platforms) often mimic phishing patterns - urgency, call-to-action language, branded tone. Content analysis alone cannot distinguish them from forgeries.
+
+`header_analyzer.is_verified_brand()` identifies official senders by extracting the registered domain via `tldextract` and matching it against the brand-to-domain map. For verified senders:
+
+- **Contextual Dampening:** AI-generated signals are reduced to 20% of their original weight. They remain visible in the breakdown but no longer dominate the score.
+- **Floor Exclusion:** Only technical evidence (`HEADERS`/`URLS`) can trigger the 90-point hard-fail floor. Semantic signals are ignored by the floor logic.
+
+A verified domain with a lookalike URL or a failed SPF check still scores high - `HEADERS`/`URLS` signals bypass verification entirely.
+
+---
+## Modular Architecture and Separation of Concerns
+
+### The Zero-Touch UI Principle
+
+The system was built with a strict boundary between the frontend (Gmail Add-on) and the backend (FastAPI server). The Apps Script layer has exactly one job: read the open email, assemble a structured JSON payload, send it to the backend, and render whatever comes back. No analysis logic lives in the frontend.
+
+This was a deliberate choice from the start. Google Apps Script is a constrained, difficult-to-test environment. Keeping all business logic on the Python backend means the analysis pipeline can be developed, tested, and debugged with standard tools, while the add-on stays simple and stable.
+
+### Seamless Evolution in Practice
+
+The value of this separation became clear across two iterations of the project. In the first iteration, result caching (`cache_manager.py`) was added entirely on the backend - the add-on sent the same payload it always did and received the same `AnalysisResult` shape. The frontend was not touched.
+
+In the second iteration, the PII anonymization layer was *moved* from the backend to the frontend - a privacy-by-design improvement. The backend contract (the `EmailPayload` schema) did not change; the subject and body fields simply arrive pre-anonymized. The backend's analyzers, scorer, and cache logic required no modification.
+
+This is the practical payoff of a clean API boundary: moving a cross-cutting concern from one layer to another required changes only in the layer being changed. No downstream code broke, and the add-on continued to send the same JSON shape it always had.
+
+---
+## Architectural Trade-offs and Decisions
+
+### 1. Privacy-First Analysis (Client-Side PII Anonymization)
+
+**Decision:** Strip all recognizable PII (email addresses, phone numbers, titled names) from the email text *in the browser*, before the payload is transmitted to the backend.
+
+**Why:** Moving the anonymization boundary from the backend to the Gmail Add-on (`EmailParser.gs`) means PII is scrubbed before it ever leaves the user's Gmail session. The backend receives a pre-cleaned payload. The Claude API never sees raw personal data. This is a stronger privacy guarantee than server-side anonymization, which still exposes the raw content to the network transit and server process.
+
+**The trade-off:** After anonymization, embedded email addresses in the body are replaced with `[EMAIL]`. This means Claude cannot reason about specific domain names in the body text. We accept this loss because:
+
+- Header analysis (SPF/DKIM/DMARC, display-name spoofing, Reply-To mismatch) and URL analysis run on the original `from_address` and header fields, which are *not* anonymized - they are needed for domain verification.
+- The LLM's comparative advantage is detecting *semantic* signals like urgency and social engineering patterns, not validating addresses. A rule-based check is better suited for address validation.
+
+**Implementation:** Three regex patterns in `EmailParser.gs` mirror the original Python anonymizer:
+- Email addresses → `[EMAIL]`
+- Phone numbers (US/international formats) → `[PHONE]`
+- Names preceded by a common honorific (`Mr.`, `Dr.`, `Prof.`, etc.) → `[NAME]`
+
+---
+
+### 2. Heuristic Scoring vs. Machine Learning
+
+**Decision:** Use a fixed, weighted scoring system where each signal contributes a predetermined integer weight to the total score.
+
+**Why:** The task specification requires an explainable verdict with per-signal reasoning. A weighted heuristic system maps directly to this requirement: every point in the final score can be traced back to a specific, named signal with a human-readable description.
+
+**The trade-off:**
+
+| | Weighted Heuristics (current) | ML-Based Scoring (future) |
+|---|---|---|
+| Explainability | Full - each signal is auditable | Partial - requires interpretability tooling |
+| Calibration | Manual - weights are educated guesses | Data-driven - learned from labeled examples |
+| Coverage | Limited to signals someone thought to write | Can learn subtle correlations from data |
+| Maintenance | Requires manual tuning as tactics evolve | Requires labeled data and retraining pipeline |
+
+For a project at this stage, the heuristic approach is the right call. It produces results that are easy to understand, debug, and demonstrate. The ML path becomes worth the cost when there is a labeled dataset and a feedback mechanism to keep the model calibrated against current phishing tactics.
+
+---
+
+### 3. Performance vs. Freshness (Result Caching)
+
+**Decision:** Cache analysis results in memory (with JSON file persistence) keyed by a SHA-256 hash of the email's subject and body.
+
+**Cache key generation:**
+
+```python
+# subject and body are joined with a null byte to prevent
+# hash collisions between ("ab", "cd") and ("a", "bcd")
+raw = f"{subject}\x00{body}".encode()
+key = hashlib.sha256(raw).hexdigest()
+```
+
+**Why SHA-256:** The hash is a fixed-length fingerprint of the email content. Two emails with identical subject and body will always produce the same key, so a cached result can be returned immediately without calling any analyzer. SHA-256 is collision-resistant enough that false cache hits are not a practical concern.
+
+**The trade-off:** The cache assumes that identical email content always warrants the same verdict. This is true for bulk phishing campaigns (where the same template is sent to many recipients), which is also the scenario where caching provides the most benefit. The trade-off is that if the signal weights or detection logic are updated, cached results will be stale until the cache is cleared. For this demo, that is acceptable - a production system would version the cache keys alongside the analyzer code.
+
+**Scope:** For this demo, storage is an in-memory dictionary that persists to a local JSON file on each write. In production, this would be replaced with a shared cache (Redis or similar) to work correctly across multiple server instances.
+
+---
 ## Security and Privacy Design
 
 Security is treated as a first-class concern in this project. Since the system processes untrusted emails, every layer of the architecture is designed to minimize risk and protect sensitive data.
@@ -342,7 +334,6 @@ Every email body, attachment, and header is treated as a potential attack vector
 - **No file execution**: The system identifies high-risk attachments by metadata (file extension, MIME type) but deliberately avoids opening or executing them. This ensures the server is never exposed to malicious code, at the cost of not detecting obfuscated threats - a trade-off addressed in the [Future Roadmap](#future-roadmap).
 
 ---
-
 ## Running Locally
 
 ### Prerequisites
@@ -393,7 +384,6 @@ Copy the `https://` URL - you will need it in step 4.
 5. Open [Gmail](https://mail.google.com), open any email - the sidebar appears.
 
 ---
-
 ## Project Structure
 
 The project is divided into two main parts: the **Gmail Add-on** (Frontend) and the **Analysis Server** (Backend).
@@ -425,7 +415,6 @@ The project is divided into two main parts: the **Gmail Add-on** (Frontend) and 
 * **`Dockerfile`**: Instructions for running the server in a container.
 
 ---
-
 ## Future Roadmap: Evolution from Static to Dynamic Analysis
 
 The current system provides a robust baseline for phishing detection. However, there are inherent limitations in static analysis that the following roadmap items are designed to address.
