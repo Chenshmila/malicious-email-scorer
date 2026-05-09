@@ -109,29 +109,14 @@ Dr. Sarah Connor        →  [NAME]
 
 ### 2. Verified Brand Handling
 
-Automated alerts from financial institutions and service providers use the same patterns as phishing - urgency, call-to-action language, branded tone. Content analysis alone cannot distinguish them.
+Automated alerts from trusted brands (banks, payment services, tech platforms) often mimic phishing patterns - urgency, call-to-action language, branded tone. Content analysis alone cannot distinguish them from forgeries.
 
-`header_analyzer.is_verified_brand()` extracts the sender's registered domain via `tldextract` and checks it against the brand-to-domain map. If it matches, the scorer dampens all `CONTENT` signals and excludes them from the hard-fail floor.
+`header_analyzer.is_verified_brand()` identifies official senders by extracting the registered domain via `tldextract` and matching it against the brand-to-domain map. For verified senders:
 
-**What "verified" means:** Only AI-generated semantic signals are dampened. A verified domain with a lookalike URL or a failed SPF check still scores high - `HEADERS`/`URLS` signals bypass verification entirely.
+- **Contextual Dampening:** AI-generated signals are reduced to 20% of their original weight. They remain visible in the breakdown but no longer dominate the score.
+- **Floor Exclusion:** Only technical evidence (`HEADERS`/`URLS`) can trigger the 90-point hard-fail floor. Semantic signals are ignored by the floor logic.
 
----
-
-### 3. Context-Aware Signal Dampening
-
-When a sender is verified, all `SignalCategory.CONTENT` signals (AI-generated) are transformed before scoring:
-
-| Original | After dampening |
-|---|---|
-| `severity=CRITICAL`, `weight=20` | `severity=MEDIUM`, `weight=4` |
-| `severity=HIGH`, `weight=15` | `severity=LOW`, `weight=3` |
-| `severity=MEDIUM`, `weight=10` | `severity=MEDIUM`, `weight=2` |
-
-The signals remain visible in the sidebar breakdown (with their reduced weights), so the user can still see that urgency language was detected - they just understand it is not being treated as a threat indicator for this sender. Transparency is preserved.
-
-For verified senders, `CONTENT` signals are ignored by the floor logic. Only `HEADERS` and `URLS` signals can trigger the floor - urgency language alone should never lock a sender with clean technical authentication at 90/CRITICAL.
-
----
+A verified domain with a lookalike URL or a failed SPF check still scores high - `HEADERS`/`URLS` signals bypass verification entirely.
 
 ---
 
