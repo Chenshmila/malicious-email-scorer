@@ -112,7 +112,6 @@ The rule-based analyzers handle unambiguous signals (SPF fail = cryptographicall
 | DMARC Policy Violation | 15 | The domain owner's explicit policy flags this message as fraudulent. |
 | Display Name Spoofing | 20 | Display name claims to be a known brand but the registered domain of the sender does not match. Uses `tldextract` to compare registered domains, so `no-reply@accounts.google.com` correctly passes the Google check. The most common phishing technique - easy to execute, highly effective against non-technical users. |
 | Reply-To Domain Mismatch | 15 | Sender and Reply-To are on different domains - replies go to an attacker-controlled inbox without the forged domain. |
-| Temporal Anomaly Detected | 10 | Email purportedly from a financial institution (PayPal, Chase, IRS, etc.) was delivered on a weekend or outside business hours (10 PM – 6 AM) in the sender's local timezone. Automated alerts from banks operate on predictable business-hour schedules; deep-night delivery is a meaningful anomaly. |
 
 ### URL Signals (deterministic)
 
@@ -165,6 +164,16 @@ Claude is asked to identify:
 | Linguistic Anomaly Detected | 10-15 | Signs of Machine Translation: wrong verb tense or gender agreement, unnatural or stilted phrasing, broken sentence structure, or vocabulary mismatches that suggest the text was auto-translated from another language. Phishing kits are often translated from Russian, Chinese, or Romanian before deployment. |
 
 Claude returns structured JSON via the `tool_use` API, making the output both reliable and directly mappable to `Signal` objects.
+
+### Temporal Analysis Module (standalone behavioral component)
+
+The Temporal Analyzer is a dedicated, standalone module (`temporal_analyzer.py`) — separate from the Header, URL, and Content analyzers. It operates on a distinct class of evidence: not what an email claims, but *when* it was delivered. Because it reasons about behavioral patterns rather than syntactic content, it is intentionally isolated from the header-parsing pipeline to keep concerns cleanly separated.
+
+| Signal | Risk | Weight | Rationale |
+|---|---|---|---|
+| Temporal Anomaly Detected | Medium | 10 | An email purportedly from a financial institution (PayPal, Chase, IRS, etc.) was delivered on a weekend or outside business hours (10 PM – 6 AM local time). Automated alerts from banks and payment services operate on predictable, business-hour schedules — deep-night or weekend delivery is a statistically meaningful anomaly that warrants increased scrutiny. |
+
+This signal is intentionally weighted as a supporting indicator, not a standalone condemner. A legitimate bank alert delivered at 11 PM is unusual but not impossible. When this signal co-occurs with authentication failures or lookalike domains, its contribution to the additive score meaningfully raises the final verdict.
 
 ### Scoring
 
