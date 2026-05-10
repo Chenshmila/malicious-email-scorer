@@ -171,7 +171,7 @@ The Temporal Analyzer is a dedicated, standalone module (`temporal_analyzer.py`)
 
 | Signal | Risk | Weight | Rationale |
 |---|---|---|---|
-| Temporal Anomaly Detected | Medium | 10 | An email purportedly from a financial institution (PayPal, Chase, IRS, etc.) was delivered on a weekend or outside business hours (10 PM – 6 AM local time). Automated alerts from banks and payment services operate on predictable, business-hour schedules — deep-night or weekend delivery is a statistically meaningful anomaly that warrants increased scrutiny. |
+| Temporal Anomaly Detected | Medium | 10 | An email purportedly from a financial institution (PayPal, Chase, IRS, etc.) was delivered on a weekend or outside business hours (10 PM – 6 AM local time). Automated alerts from banks and payment services operate on predictable, business-hour schedules - deep-night or weekend delivery is a statistically meaningful anomaly that warrants increased scrutiny. |
 
 This signal is intentionally weighted as a supporting indicator, not a standalone condemner. A legitimate bank alert delivered at 11 PM is unusual but not impossible. When this signal co-occurs with authentication failures or lookalike domains, its contribution to the additive score meaningfully raises the final verdict.
 
