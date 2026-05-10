@@ -167,7 +167,7 @@ Claude returns structured JSON via the `tool_use` API, making the output both re
 
 ### Temporal Analysis Module (standalone behavioral component)
 
-The Temporal Analyzer is a dedicated, standalone module (`temporal_analyzer.py`) — separate from the Header, URL, and Content analyzers. It operates on a distinct class of evidence: not what an email claims, but *when* it was delivered. Because it reasons about behavioral patterns rather than syntactic content, it is intentionally isolated from the header-parsing pipeline to keep concerns cleanly separated.
+The Temporal Analyzer is a dedicated, standalone module (`temporal_analyzer.py`), separate from the Header, URL, and Content analyzers. It operates on a distinct class of evidence: not what an email claims, but *when* it was delivered. Because it reasons about behavioral patterns rather than syntactic content, it is intentionally isolated from the header-parsing pipeline to keep concerns cleanly separated.
 
 | Signal | Risk | Weight | Rationale |
 |---|---|---|---|
